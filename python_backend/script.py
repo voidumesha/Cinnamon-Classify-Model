@@ -4,28 +4,63 @@ import datetime
 import numpy as np
 from PIL import Image
 import io
-import tensorflow as tf
+import cv2
+from tensorflow.keras.models import load_model
+from tensorflow.keras.applications.resnet import preprocess_input
+from sklearn.preprocessing import LabelBinarizer
 
 app = Flask(__name__)
 
-#MySQL Database Connection
+# MySQL Database Connection
 db = pymysql.connect(
-    host='127.0.0.1',  # Use 'localhost' or '127.0.0.1'
-    user='root',       # MySQL username
-    password='',       # MySQL password (leave blank if none)
-    database='cinnalyze'  # Your database name
+    host='127.0.0.1',
+    user='root',
+    password='',
+    database='cinnalyze'
 )
 
-#Load TensorFlow Model (If available)
-model = tf.keras.models.load_model("/C:/CINNAMON/Cinnamon App/Cinnamon App/python_backend/Segmentation_Model.h5")
-# model = tf.keras.models.load_model("your_model_path.h5")
+# Load Models
+segmentation_model_path = r'C:/CINNAMON/Cinnamon App/Cinnamon App/python_backend/Segmentation_Model.h5.ipynb'
+classification_model_path = r'C:/CINNAMON/Cinnamon App/Cinnamon App/python_backend/ResNet101_Updated_Implementation_02.h5.ipynb'
+classes_path = r'C:/CINNAMON/Cinnamon App/Cinnamon App/python_backend/classes4.npy'
 
-#Route to Confirm Server is Running
+segmentation_model = load_model(segmentation_model_path)
+classification_model = load_model(classification_model_path)
+
+# Load class labels
+lb = LabelBinarizer()
+lb.classes_ = np.load(classes_path)
+
+# Helper functions
+def preprocess_for_segmentation(image):
+    """Preprocess image for segmentation."""
+    img = cv2.resize(image, (256, 256)) / 255.0
+    return np.expand_dims(img, axis=0)
+
+def segment_image(image):
+    """Perform image segmentation."""
+    preprocessed_img = preprocess_for_segmentation(image)
+    segmented_img = segmentation_model.predict(preprocessed_img)
+    segmented_img = (segmented_img > 0.5).astype(np.uint8) * 255
+    return cv2.cvtColor(np.squeeze(segmented_img), cv2.COLOR_GRAY2RGB)
+
+def preprocess_for_classification(image):
+    """Preprocess image for classification."""
+    img = cv2.resize(image, (224, 224))
+    return preprocess_input(np.expand_dims(img, axis=0))
+
+def classify_image(image):
+    """Classify segmented image."""
+    features = preprocess_for_classification(image)
+    predictions = classification_model.predict(features)
+    predicted_class = lb.inverse_transform(predictions)[0]
+    return predicted_class
+
+# Routes
 @app.route('/', methods=['GET'])
 def home():
     return "Cinnamon Analysis API is running!", 200
 
-#Upload Route to Save Image to Database
 @app.route('/upload', methods=['POST'])
 def upload_image():
     try:
@@ -54,7 +89,6 @@ def upload_image():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-#Analyze Route to Process the Uploaded Image
 @app.route('/analyze', methods=['POST'])
 def analyze_image():
     try:
@@ -64,19 +98,18 @@ def analyze_image():
         if not file or not bark_id:
             return jsonify({"error": "Bark ID and image are required."}), 400
 
-        # Process the image for prediction (Mock process here)
+        # Read and preprocess the uploaded image
         img = Image.open(io.BytesIO(file.read()))
-        img = img.resize((224, 224))  # Resize as needed for model
-        img_array = np.array(img) / 255.0
-        img_array = np.expand_dims(img_array, axis=0)
+        img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
-        # Mock prediction logic (replace with your model)
-        # predictions = model.predict(img_array)
-        # quality_name = "high" if predictions[0][0] > 0.5 else "low"
-        quality_name = "high"  # Example output
-        description = "It is high-quality cinnamon."
+        # Perform segmentation
+        segmented_img = segment_image(img)
 
-        # Save analysis result to the 'quality' table
+        # Perform classification on the segmented image
+        quality_name = classify_image(segmented_img)
+        description = f"The cinnamon quality is predicted to be '{quality_name}'."
+
+        # Save analysis result to the database
         cursor = db.cursor()
         sql = "INSERT INTO quality (Quality_Name, Description, barkId, created_at) VALUES (%s, %s, %s, NOW())"
         cursor.execute(sql, (quality_name, description, bark_id))
@@ -92,7 +125,6 @@ def analyze_image():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-#  Route to Fetch Quality Records
 @app.route('/quality-records', methods=['GET'])
 def get_quality_records():
     try:
@@ -116,6 +148,6 @@ def get_quality_records():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Run the Flask Server
+# Run the Flask server
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=3001)
