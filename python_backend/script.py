@@ -6,7 +6,8 @@ from PIL import Image
 import io
 import cv2
 from tensorflow.keras.models import load_model
-from tensorflow.keras.applications.resnet import preprocess_input
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications.resnet50 import preprocess_input
 from sklearn.preprocessing import LabelBinarizer
 
 app = Flask(__name__)
@@ -20,8 +21,8 @@ db = pymysql.connect(
 )
 
 # Load Models
-segmentation_model_path = r'C:/CINNAMON/Cinnamon App/Cinnamon App/python_backend/Segmentation_Model.h5.ipynb'
-classification_model_path = r'C:/CINNAMON/Cinnamon App/Cinnamon App/python_backend/ResNet101_Updated_Implementation_02.h5.ipynb'
+segmentation_model_path = r'C:/CINNAMON/Cinnamon App/Cinnamon App/python_backend/unet_cinnamon_segmentation_v1.h5'
+classification_model_path = r'C:/CINNAMON/Cinnamon App/Cinnamon App/python_backend/final_classifier_model1.h5'
 classes_path = r'C:/CINNAMON/Cinnamon App/Cinnamon App/python_backend/classes4.npy'
 
 segmentation_model = load_model(segmentation_model_path)
@@ -29,12 +30,17 @@ classification_model = load_model(classification_model_path)
 
 # Load class labels
 lb = LabelBinarizer()
-lb.classes_ = np.load(classes_path)
+class_labels = np.load(classes_path, allow_pickle=True)
+lb.fit(class_labels)  # Fit LabelBinarizer with class labels
+print(f"Loaded class labels: {class_labels}")
+
+# Load ResNet50 feature extractor
+feature_extractor = ResNet50(weights='imagenet', include_top=False, pooling='avg')
 
 # Helper functions
 def preprocess_for_segmentation(image):
     """Preprocess image for segmentation."""
-    img = cv2.resize(image, (256, 256)) / 255.0
+    img = cv2.resize(image, (256, 256)) / 255.0  # Normalize to [0, 1]
     return np.expand_dims(img, axis=0)
 
 def segment_image(image):
@@ -45,15 +51,29 @@ def segment_image(image):
     return cv2.cvtColor(np.squeeze(segmented_img), cv2.COLOR_GRAY2RGB)
 
 def preprocess_for_classification(image):
-    """Preprocess image for classification."""
-    img = cv2.resize(image, (224, 224))
-    return preprocess_input(np.expand_dims(img, axis=0))
+    """Preprocess image for feature extraction and classification."""
+    img = cv2.resize(image, (224, 224))  # Resize to 224x224
+    img = preprocess_input(np.expand_dims(img, axis=0))  # Preprocess using ResNet preprocess
+    return img
 
 def classify_image(image):
     """Classify segmented image."""
-    features = preprocess_for_classification(image)
-    predictions = classification_model.predict(features)
-    predicted_class = lb.inverse_transform(predictions)[0]
+    # Step 1: Extract features
+    preprocessed_img = preprocess_for_classification(image)
+    features = feature_extractor.predict(preprocessed_img)  # Shape: (1, 2048)
+
+    # Step 2: Classify using the classification model
+    predictions = classification_model.predict(features)  # Output shape: (1, num_classes)
+    print(f"Predictions: {predictions}, Shape: {predictions.shape}")
+
+    # Step 3: Decode class label
+    try:
+        predicted_class = lb.inverse_transform(predictions)[0]
+    except Exception as e:
+        print(f"LabelBinarizer inverse_transform failed: {str(e)}. Using fallback.")
+        predicted_index = np.argmax(predictions, axis=1)[0]
+        predicted_class = class_labels[predicted_index]  # Map index to class label
+
     return predicted_class
 
 # Routes
@@ -64,14 +84,12 @@ def home():
 @app.route('/upload', methods=['POST'])
 def upload_image():
     try:
-        # Retrieve user_id and image from the request
         user_id = request.form.get('user_id')
         file = request.files.get('image')
 
         if not user_id or not file:
             return jsonify({"error": "User ID and image are required."}), 400
 
-        # Read image data
         image_data = file.read()
 
         # Save image to MySQL database
@@ -103,10 +121,17 @@ def analyze_image():
         img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
         # Perform segmentation
+        print("Performing segmentation...")
         segmented_img = segment_image(img)
+        cv2.imwrite('segmented_output.jpg', segmented_img)  # Save segmented image for debugging
+        print("Segmentation complete.")
 
         # Perform classification on the segmented image
+        print("Performing classification...")
         quality_name = classify_image(segmented_img)
+        print(f"Classification result: {quality_name}")
+
+        # Prepare description
         description = f"The cinnamon quality is predicted to be '{quality_name}'."
 
         # Save analysis result to the database
@@ -123,6 +148,7 @@ def analyze_image():
         }), 200
 
     except Exception as e:
+        print(f"Error during analysis: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/quality-records', methods=['GET'])
@@ -138,7 +164,6 @@ def get_quality_records():
         cursor.execute(sql)
         results = cursor.fetchall()
 
-        # Convert image BLOB to base64 for JSON response
         for record in results:
             if record['image']:
                 record['image'] = record['image'].hex()
