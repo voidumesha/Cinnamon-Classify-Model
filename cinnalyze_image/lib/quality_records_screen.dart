@@ -6,7 +6,7 @@ import 'quality_details_screen.dart';
 class QualityRecordsScreen extends StatelessWidget {
   Future<List<Map<String, dynamic>>> fetchQualityRecords() async {
     final response = await http
-        .get(Uri.parse('http://192.168.151.197:3001/quality-records'));
+        .get(Uri.parse('http://192.168.137.197:3001/quality-records'));
 
     if (response.statusCode == 200) {
       List<dynamic> data = jsonDecode(response.body);

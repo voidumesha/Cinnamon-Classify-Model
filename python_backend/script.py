@@ -9,6 +9,7 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.applications import ResNet50
 from tensorflow.keras.applications.resnet50 import preprocess_input
 from sklearn.preprocessing import LabelBinarizer
+import tensorflow as tf
 
 app = Flask(__name__)
 
@@ -20,24 +21,47 @@ db = pymysql.connect(
     database='cinnalyze'
 )
 
-# Load Models
-segmentation_model_path = r'C:/CINNAMON/Cinnamon App/Cinnamon App/python_backend/unet_cinnamon_segmentation_v1.h5'
-classification_model_path = r'C:/CINNAMON/Cinnamon App/Cinnamon App/python_backend/final_classifier_model1.h5'
-classes_path = r'C:/CINNAMON/Cinnamon App/Cinnamon App/python_backend/classes4.npy'
+# Custom loss function for segmentation
+def dice_loss(y_true, y_pred, smooth=1.0):
+    intersection = tf.reduce_sum(y_true * y_pred)
+    union = tf.reduce_sum(y_true) + tf.reduce_sum(y_pred)
+    return 1 - (2.0 * intersection + smooth) / (union + smooth)
 
-segmentation_model = load_model(segmentation_model_path)
-classification_model = load_model(classification_model_path)
+# File paths
+segmentation_model_path = r'C:/CINNAMON/Cinnamon App/cinnamon_quality/models/best_segmentation_model.h5'
+classification_model_path = r'C:/CINNAMON/Cinnamon App/cinnamon_quality/models/final_classification_model.h5'
 
-# Load class labels
-lb = LabelBinarizer()
-class_labels = np.load(classes_path, allow_pickle=True)
-lb.fit(class_labels)  # Fit LabelBinarizer with class labels
-print(f"Loaded class labels: {class_labels}")
+# Load segmentation model with custom loss
+try:
+    segmentation_model = load_model(segmentation_model_path, custom_objects={'dice_loss': dice_loss})
+    print("Segmentation model loaded successfully!")
+except Exception as e:
+    print(f"Error loading segmentation model: {e}")
+
+# Load classification model
+try:
+    classification_model = load_model(classification_model_path)
+    print("Classification model loaded successfully!")
+except Exception as e:
+    print(f"Error loading classification model: {e}")
+
+# Dynamically generate class labels from dataset structure
+IMG_SIZE = 224
+BATCH_SIZE = 32
+datagen = tf.keras.preprocessing.image.ImageDataGenerator(rescale=1./255)
+train_flow = datagen.flow_from_directory(
+    'C:/CINNAMON/Cinnamon App/cinnamon_quality/dataset/images',
+    target_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE,
+    class_mode='categorical'
+)
+class_labels = {v: k for k, v in train_flow.class_indices.items()}
+print(f"Class labels: {class_labels}")
 
 # Load ResNet50 feature extractor
 feature_extractor = ResNet50(weights='imagenet', include_top=False, pooling='avg')
 
-# Helper functions
+# Helper Functions
 def preprocess_for_segmentation(image):
     """Preprocess image for segmentation."""
     img = cv2.resize(image, (256, 256)) / 255.0  # Normalize to [0, 1]
@@ -48,32 +72,26 @@ def segment_image(image):
     preprocessed_img = preprocess_for_segmentation(image)
     segmented_img = segmentation_model.predict(preprocessed_img)
     segmented_img = (segmented_img > 0.5).astype(np.uint8) * 255
-    return cv2.cvtColor(np.squeeze(segmented_img), cv2.COLOR_GRAY2RGB)
+    segmented_img = cv2.cvtColor(np.squeeze(segmented_img), cv2.COLOR_GRAY2RGB)
+    # Resize the segmented image to 224x224 for classification
+    resized_segmented_img = cv2.resize(segmented_img, (224, 224))
+    return resized_segmented_img
 
 def preprocess_for_classification(image):
     """Preprocess image for feature extraction and classification."""
-    img = cv2.resize(image, (224, 224))  # Resize to 224x224
-    img = preprocess_input(np.expand_dims(img, axis=0))  # Preprocess using ResNet preprocess
+    img = preprocess_input(np.expand_dims(image, axis=0))  # Preprocess for ResNet50
     return img
 
 def classify_image(image):
     """Classify segmented image."""
-    # Step 1: Extract features
+    # Extract features
     preprocessed_img = preprocess_for_classification(image)
-    features = feature_extractor.predict(preprocessed_img)  # Shape: (1, 2048)
+    features = feature_extractor.predict(preprocessed_img)  # Extract features
+    predictions = classification_model.predict(features)  # Predict quality
 
-    # Step 2: Classify using the classification model
-    predictions = classification_model.predict(features)  # Output shape: (1, num_classes)
-    print(f"Predictions: {predictions}, Shape: {predictions.shape}")
-
-    # Step 3: Decode class label
-    try:
-        predicted_class = lb.inverse_transform(predictions)[0]
-    except Exception as e:
-        print(f"LabelBinarizer inverse_transform failed: {str(e)}. Using fallback.")
-        predicted_index = np.argmax(predictions, axis=1)[0]
-        predicted_class = class_labels[predicted_index]  # Map index to class label
-
+    # Decode prediction
+    predicted_index = np.argmax(predictions, axis=1)[0]
+    predicted_class = class_labels[predicted_index]
     return predicted_class
 
 # Routes
@@ -92,7 +110,7 @@ def upload_image():
 
         image_data = file.read()
 
-        # Save image to MySQL database
+        # Save image to database
         cursor = db.cursor()
         sql = "INSERT INTO barkimage (User_id, image, date_time_stamp) VALUES (%s, %s, NOW())"
         cursor.execute(sql, (user_id, image_data))
@@ -126,7 +144,7 @@ def analyze_image():
         cv2.imwrite('segmented_output.jpg', segmented_img)  # Save segmented image for debugging
         print("Segmentation complete.")
 
-        # Perform classification on the segmented image
+        # Perform classification
         print("Performing classification...")
         quality_name = classify_image(segmented_img)
         print(f"Classification result: {quality_name}")
@@ -134,7 +152,7 @@ def analyze_image():
         # Prepare description
         description = f"The cinnamon quality is predicted to be '{quality_name}'."
 
-        # Save analysis result to the database
+        # Save result to the database
         cursor = db.cursor()
         sql = "INSERT INTO quality (Quality_Name, Description, barkId, created_at) VALUES (%s, %s, %s, NOW())"
         cursor.execute(sql, (quality_name, description, bark_id))
@@ -173,6 +191,5 @@ def get_quality_records():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Run the Flask server
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=3001)

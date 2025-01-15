@@ -25,29 +25,36 @@ class _ImageUploadScreenState extends State<ImageUploadScreen> {
   }
 
   Future<void> _uploadImage() async {
-    if (_image == null) _showMessage('Image is not selected');
+    if (_image == null) {
+      _showMessage('Image is not selected');
+      return;
+    }
 
     final request = http.MultipartRequest(
       'POST',
-      Uri.parse('http://192.168.151.197:3001/upload'), // Use correct URL
+      Uri.parse(
+          'http://192.168.137.197:3001/upload'), // Ensure this URL matches the backend
     );
     request.fields['user_id'] = '7'; // Example user ID
-    request.files.add(
-      await http.MultipartFile.fromPath('image', _image!.path),
-    );
+    request.files.add(await http.MultipartFile.fromPath('image', _image!.path));
 
     try {
       final response = await request.send();
       final responseData = await response.stream.bytesToString();
 
+      print('Response status: ${response.statusCode}');
+      print('Response body: $responseData');
+
       if (response.statusCode == 200) {
         final jsonResponse = jsonDecode(responseData);
         _barkId = jsonResponse['barkId']; // Store barkId
+        print('Bark ID: $_barkId');
         _navigateToAnalysisScreen();
       } else {
         _showMessage('Image upload failed! Please try again.');
       }
     } catch (e) {
+      print('Upload error: $e');
       _showMessage('An error occurred while uploading the image.');
     }
   }
@@ -189,7 +196,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
 
   Future<void> _analyzeImage() async {
     final uri =
-        Uri.parse('http://192.168.151.197:3001/analyze'); // Flask server URL
+        Uri.parse('http://192.168.137.197:3001/analyze'); // Flask server URL
 
     setState(() {
       isLoading = true; // Show loading indicator

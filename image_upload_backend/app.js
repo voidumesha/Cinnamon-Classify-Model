@@ -10,7 +10,7 @@ app.use(bodyParser.json());
 app.use(cors());
 
 const db = mysql.createConnection({
-    host: 'localhost',
+    host: '127.0.0.1',
     user: 'root', 
     password: '', 
     database: 'cinnalyze' 
@@ -28,15 +28,25 @@ app.post('/upload', upload.single('image'), (req, res) => {
     const image = req.file ? req.file.buffer : null;
 
     if (!user_id || !image) {
+        console.log("Missing user_id or image in request");
         return res.status(400).send('User ID and image are required.');
     }
 
+    console.log(`Received user_id: ${user_id}`);
+    console.log(`Image size: ${image.length} bytes`);
+
     const query = `INSERT INTO barkimage (User_id, image, date_time_stamp) VALUES (?, ?, NOW())`;
     db.query(query, [user_id, image], (err, result) => {
-        if (err) return res.status(500).send(err);
+        if (err) {
+            console.error("Database error:", err);
+            return res.status(500).send(err);
+        }
+
+        console.log(`Image successfully uploaded with barkId: ${result.insertId}`);
         res.send({ success: true, message: 'Image uploaded successfully!', barkId: result.insertId });
     });
 });
+
 
 app.get('/quality-records', (req, res) => {
     const query = `
