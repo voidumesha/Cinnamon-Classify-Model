@@ -2,52 +2,60 @@ from flask import Flask, request, jsonify
 import pymysql
 import datetime
 import numpy as np
+import cv2
 from PIL import Image
 import io
-import cv2
 from tensorflow.keras.models import load_model
-from tensorflow.keras.applications import ResNet50
 from tensorflow.keras.applications.resnet50 import preprocess_input
 from sklearn.preprocessing import LabelBinarizer
 import tensorflow as tf
+import os
 
 app = Flask(__name__)
 
-# MySQL Database Connection
+# ==========================
+# Database Connection
+# ==========================
 db = pymysql.connect(
     host='127.0.0.1',
     user='root',
     password='',
-    database='cinnalyze'
+    database='cinnalyze',
+    autocommit=True
 )
 
-# Custom loss function for segmentation
+# ==========================
+# Custom Dice Loss Function
+# ==========================
 def dice_loss(y_true, y_pred, smooth=1.0):
     intersection = tf.reduce_sum(y_true * y_pred)
     union = tf.reduce_sum(y_true) + tf.reduce_sum(y_pred)
     return 1 - (2.0 * intersection + smooth) / (union + smooth)
 
-# File paths
+# ==========================
+# Load Models
+# ==========================
 segmentation_model_path = r'C:/CINNAMON/Cinnamon App/cinnamon_quality/models/best_segmentation_model.h5'
 classification_model_path = r'C:/CINNAMON/Cinnamon App/cinnamon_quality/models/final_classification_model.h5'
 
-# Load segmentation model with custom loss
 try:
     segmentation_model = load_model(segmentation_model_path, custom_objects={'dice_loss': dice_loss})
     print("Segmentation model loaded successfully!")
 except Exception as e:
     print(f"Error loading segmentation model: {e}")
 
-# Load classification model
 try:
     classification_model = load_model(classification_model_path)
     print("Classification model loaded successfully!")
 except Exception as e:
     print(f"Error loading classification model: {e}")
 
-# Dynamically generate class labels from dataset structure
+# ==========================
+# Load Class Labels
+# ==========================
 IMG_SIZE = 224
 BATCH_SIZE = 32
+
 datagen = tf.keras.preprocessing.image.ImageDataGenerator(rescale=1./255)
 train_flow = datagen.flow_from_directory(
     'C:/CINNAMON/Cinnamon App/cinnamon_quality/dataset/images',
@@ -55,46 +63,39 @@ train_flow = datagen.flow_from_directory(
     batch_size=BATCH_SIZE,
     class_mode='categorical'
 )
+
 class_labels = {v: k for k, v in train_flow.class_indices.items()}
 print(f"Class labels: {class_labels}")
 
-# Load ResNet50 feature extractor
-feature_extractor = ResNet50(weights='imagenet', include_top=False, pooling='avg')
-
+# ==========================
 # Helper Functions
+# ==========================
 def preprocess_for_segmentation(image):
-    """Preprocess image for segmentation."""
-    img = cv2.resize(image, (256, 256)) / 255.0  # Normalize to [0, 1]
+    img = cv2.resize(image, (224, 224)) / 255.0
     return np.expand_dims(img, axis=0)
 
 def segment_image(image):
-    """Perform image segmentation."""
     preprocessed_img = preprocess_for_segmentation(image)
     segmented_img = segmentation_model.predict(preprocessed_img)
     segmented_img = (segmented_img > 0.5).astype(np.uint8) * 255
-    segmented_img = cv2.cvtColor(np.squeeze(segmented_img), cv2.COLOR_GRAY2RGB)
-    # Resize the segmented image to 224x224 for classification
-    resized_segmented_img = cv2.resize(segmented_img, (224, 224))
-    return resized_segmented_img
+    return cv2.cvtColor(np.squeeze(segmented_img), cv2.COLOR_GRAY2RGB)
 
 def preprocess_for_classification(image):
-    """Preprocess image for feature extraction and classification."""
-    img = preprocess_input(np.expand_dims(image, axis=0))  # Preprocess for ResNet50
+    img_resized = cv2.resize(image, (224, 224)) / 255.0
+    img = np.expand_dims(img_resized, axis=0)
     return img
 
 def classify_image(image):
-    """Classify segmented image."""
-    # Extract features
     preprocessed_img = preprocess_for_classification(image)
-    features = feature_extractor.predict(preprocessed_img)  # Extract features
-    predictions = classification_model.predict(features)  # Predict quality
-
-    # Decode prediction
+    predictions = classification_model.predict(preprocessed_img)
     predicted_index = np.argmax(predictions, axis=1)[0]
     predicted_class = class_labels[predicted_index]
     return predicted_class
 
-# Routes
+# ==========================
+# Flask Routes
+# ==========================
+
 @app.route('/', methods=['GET'])
 def home():
     return "Cinnamon Analysis API is running!", 200
@@ -110,7 +111,6 @@ def upload_image():
 
         image_data = file.read()
 
-        # Save image to database
         cursor = db.cursor()
         sql = "INSERT INTO barkimage (User_id, image, date_time_stamp) VALUES (%s, %s, NOW())"
         cursor.execute(sql, (user_id, image_data))
@@ -134,14 +134,12 @@ def analyze_image():
         if not file or not bark_id:
             return jsonify({"error": "Bark ID and image are required."}), 400
 
-        # Read and preprocess the uploaded image
         img = Image.open(io.BytesIO(file.read()))
         img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
         # Perform segmentation
         print("Performing segmentation...")
         segmented_img = segment_image(img)
-        cv2.imwrite('segmented_output.jpg', segmented_img)  # Save segmented image for debugging
         print("Segmentation complete.")
 
         # Perform classification
@@ -149,10 +147,8 @@ def analyze_image():
         quality_name = classify_image(segmented_img)
         print(f"Classification result: {quality_name}")
 
-        # Prepare description
+        # Save analysis result to the database
         description = f"The cinnamon quality is predicted to be '{quality_name}'."
-
-        # Save result to the database
         cursor = db.cursor()
         sql = "INSERT INTO quality (Quality_Name, Description, barkId, created_at) VALUES (%s, %s, %s, NOW())"
         cursor.execute(sql, (quality_name, description, bark_id))
@@ -168,7 +164,7 @@ def analyze_image():
     except Exception as e:
         print(f"Error during analysis: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
+    
 @app.route('/quality-records', methods=['GET'])
 def get_quality_records():
     try:
@@ -190,6 +186,8 @@ def get_quality_records():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
+# ==========================
+# Run the Flask Server
+# ==========================
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=3001)
